@@ -791,37 +791,13 @@ npm run dev
 | Viewer gets offer but no video | Track not forwarding | Check server logs for "OnTrack" event. Ensure forwarding goroutine is running. |
 | WebSocket 401 | Token mismatch | Check `AUTH_TOKEN` env var matches on all components |
 
-### H264 NAL Unit Parser Fallback
+### Green Band Artifact Fix
 
-If `h264reader` from Pion isn't available at the expected import path, use this simple Annex B parser:
+**Symptom**: Video shows correctly in the top ~30% of the frame, bottom ~70% is solid green.
 
-```go
-func splitNALUnits(data []byte) [][]byte {
-    var nals [][]byte
-    start := 0
+**Root cause**: Pion's `TrackLocalStaticSample` H264 packetizer incorrectly fragments large IDR frames (FU-A packets), causing the browser's decoder to only receive partial frame data.
 
-    for i := 0; i < len(data)-3; i++ {
-        if data[i] == 0 && data[i+1] == 0 {
-            if data[i+2] == 1 || (i+3 < len(data) && data[i+2] == 0 && data[i+3] == 1) {
-                if i > start {
-                    nals = append(nals, data[start:i])
-                }
-                start = i
-                if data[i+2] == 0 {
-                    i += 3
-                } else {
-                    i += 2
-                }
-            }
-        }
-    }
-
-    if start < len(data) {
-        nals = append(nals, data[start:])
-    }
-    return nals
-}
-```
+**Fix**: Use ffmpeg's native RTP output instead of piping raw H264 Annex B. See `pi-client/main.go` — the client uses `TrackLocalStaticRTP` with raw RTP packets from ffmpeg's `-f rtp` output.
 
 ### Adding TURN Fallback
 
@@ -864,31 +840,109 @@ curl -X POST "https://api.twilio.com/2010-04-01/Accounts/ACXXX/Tokens.json" \
 
 ## 12. Implementation Status
 
-### Current Phase: Initial Build
+### Current Phase: Local Development ✅ — Next: GCE Deployment
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Server (`server/main.go`) | ✅ Done | 618 lines Go, Pion SFU + WebSocket signaling |
-| Pi Client (`pi-client/main.go`) | ✅ Done | 485 lines Go, Pion + ffmpeg + NAL parser |
+| Server (`server/main.go`) | ✅ Done | Pion SFU + WebSocket signaling + RTCP PLI forwarding |
+| Pi Client (`pi-client/main.go`) | ✅ Done | ffmpeg → RTP/UDP → Pion `TrackLocalStaticRTP` → WebRTC |
 | Viewer (`viewer/`) | ✅ Done | Vite + TypeScript, dark glassmorphism UI, stats overlay |
 | ARCHITECTURE.md | ✅ Done | This document |
-| `go mod tidy` (server) | ⏳ Pending | Needs Go 1.22+ installed (`brew install go`) |
-| `go mod tidy` (pi-client) | ⏳ Pending | Needs Go 1.22+ installed |
-| Cross-compile pi-client | ⏳ Pending | `GOOS=linux GOARCH=arm64 go build` then scp to Pi |
-| GCE VM deployment | ⏳ Pending | Need gcloud CLI or manual setup |
-| End-to-end test | ⏳ Pending | After all components deployed |
+| Cross-compile pi-client | ✅ Done | `GOOS=linux GOARCH=arm64 go build` → SCP to Pi |
+| Local end-to-end test | ✅ Done | Pi → Mac server → Mac browser, 30fps 720p working |
+| Publisher reconnection | ✅ Done | Server replaces stale publishers instead of rejecting |
+| GCE VM deployment | ⏳ TODO | Deploy server to GCE VM with public IP |
+| TLS/nginx | ⏳ TODO | WSS (443) for signaling in production |
+| TURN server | ⏳ TODO | May be needed if Pi guest WiFi blocks UDP |
+| DNS/domain | ⏳ TODO | Optional — can use raw IP initially |
+
+### What's Working Now
+
+```
+Pi (192.168.100.2, guest WiFi)
+    ↓ WebRTC (UDP, H264 RTP)
+Mac server (192.168.100.1:8080)
+    ↓ WebRTC (UDP, H264 RTP)
+Mac browser (localhost:5173 → ws://localhost:8080/ws)
+```
+
+**Confirmed working**: 1280×720 @ 30fps, ~2500kbps, 0-1ms RTT over local network.
+
+### How to Run (Local)
+
+```bash
+# Terminal 1: Server (Mac)
+cd server && go run .
+
+# Terminal 2: Pi client (on the Pi via SSH)
+SIGNAL_URL=ws://192.168.100.1:8080/ws VIDEO_FPS=30 VIDEO_BITRATE=3000k ~/cloudproxy-pi-client
+
+# Terminal 3: Viewer (Mac)
+cd viewer && npm run dev
+# Open http://localhost:5173
+```
+
+### Lessons Learned (Critical for Future Agents)
+
+> [!CAUTION]
+> **Do NOT use Pion's `TrackLocalStaticSample` with H264 Annex B pipe (`-f h264 pipe:1`).**
+> Pion's built-in H264 packetizer produces broken FU-A fragmentation, causing a
+> persistent "green band" artifact in the bottom 60-70% of the video frame.
+> The fix is to use **ffmpeg's native RTP output** (`-f rtp rtp://127.0.0.1:PORT`)
+> and write raw RTP packets to `TrackLocalStaticRTP`. See `pi-client/main.go`.
+
+Other important notes:
+- **`-pix_fmt yuv420p`** is mandatory in ffmpeg args — the webcam outputs MJPEG 4:2:2, but H264 baseline requires 4:2:0
+- **Publisher reconnection**: Server must accept new publisher connections even if a stale one exists (replace, don't reject)
+- **PLI forwarding**: Server periodically sends PLI (Picture Loss Indication) to the publisher every 3s to ensure viewers get clean keyframes
+- **RTCP drain**: Both Pi client and server must read RTCP from RTPSender to avoid buffer buildup
+- **Buffer size**: Server RTP forwarding uses 4096-byte buffer (not 1500) to avoid truncation
+
+### Next Steps for GCE Deployment
+
+1. **Create GCE VM** (e2-micro or e2-small, Debian/Ubuntu)
+   - Open firewall: TCP 8080 (signaling), UDP 3478 + 49152-65535 (WebRTC media)
+   
+2. **Deploy server binary**
+   ```bash
+   # Build for Linux AMD64
+   cd server && GOOS=linux GOARCH=amd64 go build -o cloudproxy-server .
+   # SCP to VM and run
+   ```
+   Or use the Dockerfile: `server/Dockerfile`
+
+3. **Update Pi client** to point at the VM's public IP:
+   ```bash
+   SIGNAL_URL=ws://VM_PUBLIC_IP:8080/ws ~/cloudproxy-pi-client
+   ```
+
+4. **Update viewer** to connect to VM:
+   - Change default `SERVER_URL` in `viewer/src/main.ts` or enter in the UI
+
+5. **Add TLS** (for production):
+   - nginx reverse proxy with Let's Encrypt on port 443
+   - Change `ws://` to `wss://` in client configs
+
+6. **Add TURN** (if needed):
+   - Install coturn on the VM or use Twilio managed TURN
+   - Set `TURN_SERVERS` env var on the server
+
+### Git Repository
+
+- **Remote**: `git@github.com:jgunaratne/cloudproxy.git`
+- **Branch**: `main`
 
 ### File Structure
 
 ```
 cloudproxy/
 ├── server/
-│   ├── main.go              # SFU server (~300 lines Go)
+│   ├── main.go              # SFU server (Pion WebRTC + WebSocket signaling)
 │   ├── go.mod
 │   ├── go.sum
-│   └── Dockerfile
+│   └── Dockerfile           # Multi-stage Docker build
 ├── pi-client/
-│   ├── main.go              # Pi camera client (~200 lines Go)
+│   ├── main.go              # Pi camera client (ffmpeg → RTP → Pion)
 │   ├── go.mod
 │   └── go.sum
 ├── viewer/
@@ -897,8 +951,9 @@ cloudproxy/
 │   ├── vite.config.ts
 │   ├── index.html
 │   └── src/
-│       ├── main.ts           # WebRTC viewer logic (~250 lines TS)
-│       └── style.css         # Dark theme styles (~300 lines CSS)
-├── ARCHITECTURE.md           # ← This file
-└── README.md                 # Quick start guide
+│       ├── main.ts           # WebRTC viewer logic
+│       └── style.css         # Dark glassmorphism theme
+├── .gitignore
+└── ARCHITECTURE.md           # ← This file (single source of truth)
 ```
+
