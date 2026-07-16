@@ -1,0 +1,22 @@
+# Binaries
+cloudproxy-server
+cloudproxy-pi-client
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Node
+node_modules/
+dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
