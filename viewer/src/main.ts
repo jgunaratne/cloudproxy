@@ -15,7 +15,24 @@ const CAMERA_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
 
 const OFFLINE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="video-wrap__overlay-icon"><line x1="1" y1="1" x2="23" y2="23"/><path d="M21 21H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3m3-3h6l2 3h4a2 2 0 0 1 2 2v9.34"/><circle cx="12" cy="13" r="3" opacity="0.4"/></svg>`;
 
+// ── Helpers ───────────────────────────────────
+
+/**
+ * Returns the default WebSocket URL to pre-fill in the UI.
+ * - On localhost (Vite dev server): use the Vite proxy path.
+ * - On any other host (e.g. Cloud Run): derive wss://<host>/ws from location.
+ */
+function getDefaultWsUrl(): string {
+  const { hostname, protocol, host } = window.location;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') {
+    return 'ws://localhost:3000/cloudproxy-ws';
+  }
+  const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${wsProtocol}//${host}/ws`;
+}
+
 // ── DOM Setup ─────────────────────────────────
+
 
 function buildUI(): {
   canvas: HTMLCanvasElement;
@@ -56,7 +73,7 @@ function buildUI(): {
       <div class="panel__row">
         <div class="panel__field">
           <label class="panel__label" for="serverUrl">Server URL</label>
-          <input class="panel__input" id="serverUrl" type="text" placeholder="ws://localhost:3000/cloudproxy-ws" value="ws://localhost:3000/cloudproxy-ws" />
+          <input class="panel__input" id="serverUrl" type="text" placeholder="ws://localhost:3000/cloudproxy-ws" value="${getDefaultWsUrl()}" />
         </div>
         <div class="panel__field" style="max-width:260px">
           <label class="panel__label" for="token">Token</label>

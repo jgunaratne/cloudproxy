@@ -1,8 +1,10 @@
 package main
 
 import (
+	"embed"
 	"encoding/binary"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -11,6 +13,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
+
+//go:embed viewer/dist
+var viewerFS embed.FS
 
 // ---------------------------------------------------------------------------
 // Binary frame flags (byte 0 of every binary message)
@@ -351,6 +356,14 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.handleHealth)
 	mux.HandleFunc("/ws", srv.handleWS)
+
+	// Serve the pre-built viewer UI.
+	// Strip the "viewer/dist" prefix so the embedded FS root is "/".
+	distFS, err := fs.Sub(viewerFS, "viewer/dist")
+	if err != nil {
+		log.Fatalf("Failed to sub viewer/dist: %v", err)
+	}
+	mux.Handle("/", http.FileServer(http.FS(distFS)))
 
 	port := os.Getenv("PORT")
 	if port == "" {

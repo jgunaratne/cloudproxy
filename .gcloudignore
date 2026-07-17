@@ -1,0 +1,28 @@
+# Root .gcloudignore — controls what is sent to Cloud Build
+# (The build context must be the repo root so Docker can access both
+#  viewer/ and server/ in the multi-stage Dockerfile.)
+
+.git
+*.md
+.gitignore
+.gcloudignore
+
+# OS / editor junk
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# viewer: skip source + node_modules (Docker builds it from scratch)
+viewer/node_modules
+viewer/.env
+viewer/.env.example
+viewer/dist
+
+# pi-client is not needed for the server build
+pi-client/
+
+# server local binary (we build it inside Docker)
+server/cloudproxy-server
+server/.gcloudignore

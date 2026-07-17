@@ -204,19 +204,31 @@ ping -c 2 google.com
 
 ### Server
 
+The Dockerfile is at the **repo root** (so it can access both `server/` and `viewer/`).
+Run `gcloud builds submit` from the repo root:
+
 ```bash
-cd server
-# Local:
-go run .
-# Cloud Run:
+cd /path/to/cloudproxy   # repo root, not server/
+
+# Build and push image
 gcloud builds submit --tag gcr.io/hansel-487018/cloudproxy-server
+
+# Deploy to Cloud Run
+# --allow-unauthenticated: required so the browser can open WebSocket connections
+# (browsers can't send Authorization headers on WS; app-level AUTH_TOKEN handles security)
 gcloud run deploy cloudproxy-server \
   --image gcr.io/hansel-487018/cloudproxy-server \
   --region us-west1 --port 8080 \
+  --allow-unauthenticated \
   --set-env-vars AUTH_TOKEN=your-secret-token \
   --min-instances 1 --max-instances 1 \
   --session-affinity --timeout 3600
 ```
+
+After deploying, the viewer UI is served at:
+**https://cloudproxy-server-530731599092.us-west1.run.app/**
+
+The WebSocket URL auto-fills to `wss://cloudproxy-server-530731599092.us-west1.run.app/ws`.
 
 ### Pi Client
 
