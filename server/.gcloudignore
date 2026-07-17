@@ -1,0 +1,17 @@
+# Ignore files not needed for the Cloud Build
+.git
+.gitignore
+*.md
+*_test.go
+.gcloudignore
+
+# OS / editor files
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+
+# Socket files that cause upload errors
+*.sock
+sockets/
