@@ -3,13 +3,19 @@ import { execSync } from 'child_process';
 
 // Vite only injects VITE_-prefixed env vars automatically.
 // We need CLOUD_RUN_URL (no VITE_ prefix) at config time, so load .env explicitly.
+// Only the dev server needs it (for the WS proxy) — `vite build` runs without it,
+// e.g. inside the Cloud Build Docker image where no .env exists.
 const env = loadEnv('development', process.cwd(), '' /* load ALL prefixes */);
 
 const CLOUD_RUN_URL = env.CLOUD_RUN_URL || process.env.CLOUD_RUN_URL;
-if (!CLOUD_RUN_URL) {
-  throw new Error(
-    'CLOUD_RUN_URL is not set. Copy viewer/.env.example to viewer/.env and fill in your values.',
-  );
+
+function requireCloudRunUrl(): string {
+  if (!CLOUD_RUN_URL) {
+    throw new Error(
+      'CLOUD_RUN_URL is not set. Copy viewer/.env.example to viewer/.env and fill in your values.',
+    );
+  }
+  return CLOUD_RUN_URL;
 }
 
 function getIdentityToken(): string {
@@ -51,16 +57,16 @@ function gcloudAuthPlugin(): Plugin {
   };
 }
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [gcloudAuthPlugin()],
-  server: {
+  server: command !== 'serve' ? undefined : {
     port: 3000,
     open: true,
     proxy: {
       // Use /cloudproxy-ws to avoid conflicts with Vite's own HMR WebSocket.
       // The viewer should connect to ws://localhost:3000/cloudproxy-ws
       '/cloudproxy-ws': {
-        target: CLOUD_RUN_URL,
+        target: requireCloudRunUrl(),
         changeOrigin: true,
         secure: true,
         ws: true,
@@ -92,4 +98,4 @@ export default defineConfig({
   build: {
     target: 'es2020',
   },
-});
+}));
