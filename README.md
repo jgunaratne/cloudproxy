@@ -35,24 +35,29 @@ A shared secret that the server, Pi client, and viewer all use to authenticate W
 
 > The default dev token is `cloudproxy-dev-token` (used when `AUTH_TOKEN` is unset). For production, set a strong shared secret.
 
-### 2. Cloud Run IAM token (production only)
+### 2. Google-level access via IAP (production only)
 
-The Cloud Run service requires a **Google identity token** for IAM authentication (org policy blocks unauthenticated access). This is separate from the app-level token above.
+The Cloud Run service sits behind **Identity-Aware Proxy** (org policy blocks `allUsers`, so the service can't be made public). This is separate from the app-level token above.
 
-- **Viewer (Mac)**: The Vite dev server automatically fetches a token via `gcloud auth print-identity-token` and injects it into the proxied WebSocket connection. Just make sure you've run `gcloud auth login` first.
-- **Pi client**: Use one of these options:
-  - `GCP_IDENTITY_URL` — set to the Cloud Run service URL and the Pi will fetch a token from the GCE metadata server (works on GCE/GKE/Cloud Run)
-  - `GCP_IDENTITY_TOKEN` — set to a pre-fetched token (e.g. from `gcloud auth print-identity-token --audiences=SERVICE_URL`)
+- **Browser**: sign in with a Google account that has `roles/iap.httpsResourceAccessor` on the service. Grant with:
+  ```bash
+  gcloud beta iap web add-iam-policy-binding \
+    --resource-type=cloud-run --service=cloudproxy-server --region=us-west1 \
+    --member=user:YOUR_EMAIL --role=roles/iap.httpsResourceAccessor
+  ```
+- **Pi client (or any machine caller)**: IAP's Google-managed OAuth client **rejects ordinary identity tokens** (`gcloud auth print-identity-token` gets a 401 "Invalid JWT audience"). What works is a **service-account signed JWT** with audience `https://<service-url>/*`. Mint one with:
+  ```bash
+  GCP_IDENTITY_TOKEN=$(./scripts/mint-iap-token.sh)   # valid 1 hour
+  ```
+  This signs as `cloudproxy-pi@hansel-487018.iam.gserviceaccount.com`, which has `iap.httpsResourceAccessor`. Your user needs `roles/iam.serviceAccountTokenCreator` on that SA, plus a one-time `gcloud auth application-default login`.
 
-> For **local development** (server running on your Mac), neither component needs an identity token — only `AUTH_TOKEN` is required.
+> For **local development** (server running on your Mac), neither component needs any Google token — only `AUTH_TOKEN` is required.
 
 ## Quick Start (Cloud Run — already deployed)
 
 ### Option A: Open the Cloud Run URL directly
 
-**https://cloudproxy-server-530731599092.us-west1.run.app/** serves the viewer UI directly — no local setup needed. Enter the token and click Connect.
-
-This only works if the Cloud Run service is deployed with `--allow-unauthenticated` (see [Rebuilding After Code Changes](#rebuilding-after-code-changes)). If your org policy blocks `allUsers` invoker bindings, this URL will 403 at the IAM layer and you'll need Option B instead.
+**https://cloudproxy-server-530731599092.us-west1.run.app/** serves the viewer UI directly — no local setup needed. IAP will prompt you to sign in with Google (your account needs `iap.httpsResourceAccessor`, see [Authentication & Tokens](#authentication--tokens)); then enter the app token and click Connect.
 
 ### Option B: Run the Viewer locally (Mac)
 
@@ -86,10 +91,10 @@ scp cloudproxy-pi-client pidesk.local:~/
 ```bash
 ssh pidesk.local
 
-# Fetch a GCP identity token (run this on your Mac, paste into the Pi shell).
+# Mint an IAP-compatible token (run this on your Mac, paste into the Pi shell).
 # Tokens expire after ~1 hour — re-run this if the connection drops with a 401.
-GCP_TOKEN=$(gcloud auth print-identity-token \
-  --audiences=https://cloudproxy-server-530731599092.us-west1.run.app)
+GCP_TOKEN=$(./scripts/mint-iap-token.sh)
+echo $GCP_TOKEN
 
 SIGNAL_URL=wss://cloudproxy-server-530731599092.us-west1.run.app/ws \
 AUTH_TOKEN=your-secret-token \
@@ -227,17 +232,12 @@ cd /path/to/cloudproxy   # repo root, not server/
 # Build and push image
 gcloud builds submit --tag gcr.io/hansel-487018/cloudproxy-server
 
-# Deploy to Cloud Run
-# --allow-unauthenticated: lets the viewer UI load and WebSocket connections
-# open directly from a browser (browsers can't send Authorization headers on
-# page loads or WS handshakes). The AUTH_TOKEN below is the real security
-# boundary. If your org policy blocks allUsers invoker bindings, this flag
-# will be rejected — fall back to Option B (run the viewer locally, which
-# authenticates via `gcloud auth print-identity-token` instead).
+# Deploy to Cloud Run. Access control is handled by IAP (already enabled on
+# the service via `gcloud beta run services update cloudproxy-server --iap`);
+# org policy blocks --allow-unauthenticated, so don't bother with it.
 gcloud run deploy cloudproxy-server \
   --image gcr.io/hansel-487018/cloudproxy-server \
   --region us-west1 --port 8080 \
-  --allow-unauthenticated \
   --set-env-vars AUTH_TOKEN=your-secret-token \
   --min-instances 1 --max-instances 1 \
   --session-affinity --timeout 3600
@@ -263,7 +263,9 @@ ssh pidesk.local "sudo systemctl restart cloudproxy-pi.service"
 | Service URL | `https://cloudproxy-server-530731599092.us-west1.run.app` |
 | GCP Project | `hansel-487018` |
 | Region | `us-west1` |
-| Auth | App-level `AUTH_TOKEN` if deployed with `--allow-unauthenticated`; otherwise Google identity token (needed if org policy blocks `allUsers`) |
+| Auth | IAP (Google sign-in for browsers; signed SA JWT via `scripts/mint-iap-token.sh` for machines) + app-level `AUTH_TOKEN` |
+| IAP client ID | `369001918367-t5qrahnqdaasaifvk6akpqkpjk9vli58.apps.googleusercontent.com` |
+| Pi service account | `cloudproxy-pi@hansel-487018.iam.gserviceaccount.com` |
 
 ## Troubleshooting
 
