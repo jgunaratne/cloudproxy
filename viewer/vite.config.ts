@@ -1,9 +1,12 @@
 import { defineConfig, Plugin } from 'vite';
 import { execSync } from 'child_process';
 
-const CLOUD_RUN_URL =
-  process.env.CLOUD_RUN_URL ||
-  'https://cloudproxy-server-530731599092.us-west1.run.app';
+const CLOUD_RUN_URL = process.env.CLOUD_RUN_URL;
+if (!CLOUD_RUN_URL) {
+  throw new Error(
+    'CLOUD_RUN_URL is not set. Copy viewer/.env.example to viewer/.env and fill in your values.',
+  );
+}
 
 function getIdentityToken(): string {
   return execSync('gcloud auth print-identity-token 2>/dev/null', {

@@ -60,7 +60,7 @@ function buildUI(): {
         </div>
         <div class="panel__field" style="max-width:260px">
           <label class="panel__label" for="token">Token</label>
-          <input class="panel__input" id="token" type="password" placeholder="Auth token" value="your-secret-token" />
+          <input class="panel__input" id="token" type="password" placeholder="Auth token" value="${import.meta.env.VITE_AUTH_TOKEN ?? ''}" />
         </div>
         <button class="btn btn--connect" id="connectBtn">Connect</button>
       </div>
