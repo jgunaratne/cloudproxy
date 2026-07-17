@@ -9,13 +9,6 @@ type ConnectionState =
   | 'streaming'
   | 'error';
 
-interface Stats {
-  fps: number;
-  resolution: string;
-  bitrate: string;
-  rtt: string;
-}
-
 // ── SVG Icons ─────────────────────────────────
 
 const CAMERA_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="video-wrap__overlay-icon"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`;
@@ -25,7 +18,7 @@ const OFFLINE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24
 // ── DOM Setup ─────────────────────────────────
 
 function buildUI(): {
-  video: HTMLVideoElement;
+  canvas: HTMLCanvasElement;
   overlay: HTMLDivElement;
   overlayIcon: HTMLDivElement;
   overlayText: HTMLDivElement;
@@ -45,7 +38,7 @@ function buildUI(): {
 
     <div class="video-wrap" id="videoWrap">
       <div class="video-wrap__aspect">
-        <video class="video-wrap__video" id="video"></video>
+        <canvas class="video-wrap__video" id="videoCanvas"></canvas>
         <div class="video-wrap__overlay" id="overlay">
           <div id="overlayIcon">${CAMERA_ICON}</div>
           <div class="video-wrap__overlay-text video-wrap__overlay-text--pulse" id="overlayText">Waiting for camera…</div>
@@ -54,7 +47,7 @@ function buildUI(): {
           <div class="stats__row"><span class="stats__label">FPS</span><span class="stats__value" id="statFps">—</span></div>
           <div class="stats__row"><span class="stats__label">Res</span><span class="stats__value" id="statRes">—</span></div>
           <div class="stats__row"><span class="stats__label">Bitrate</span><span class="stats__value" id="statBitrate">—</span></div>
-          <div class="stats__row"><span class="stats__label">RTT</span><span class="stats__value" id="statRtt">—</span></div>
+          <div class="stats__row"><span class="stats__label">Frames</span><span class="stats__value" id="statFrames">—</span></div>
         </div>
       </div>
     </div>
@@ -63,11 +56,11 @@ function buildUI(): {
       <div class="panel__row">
         <div class="panel__field">
           <label class="panel__label" for="serverUrl">Server URL</label>
-          <input class="panel__input" id="serverUrl" type="text" placeholder="ws://localhost:8080/ws" value="ws://localhost:8080/ws" />
+          <input class="panel__input" id="serverUrl" type="text" placeholder="ws://localhost:3000/cloudproxy-ws" value="ws://localhost:3000/cloudproxy-ws" />
         </div>
         <div class="panel__field" style="max-width:260px">
           <label class="panel__label" for="token">Token</label>
-          <input class="panel__input" id="token" type="password" placeholder="Auth token" value="cloudproxy-dev-token" />
+          <input class="panel__input" id="token" type="password" placeholder="Auth token" value="your-secret-token" />
         </div>
         <button class="btn btn--connect" id="connectBtn">Connect</button>
       </div>
@@ -79,7 +72,7 @@ function buildUI(): {
   `;
 
   return {
-    video: document.getElementById('video') as HTMLVideoElement,
+    canvas: document.getElementById('videoCanvas') as HTMLCanvasElement,
     overlay: document.getElementById('overlay') as HTMLDivElement,
     overlayIcon: document.getElementById('overlayIcon') as HTMLDivElement,
     overlayText: document.getElementById('overlayText') as HTMLDivElement,
@@ -95,18 +88,41 @@ function buildUI(): {
 // ── Main Application ──────────────────────────
 
 function main() {
+  // Check for WebCodecs support
+  if (!('VideoDecoder' in window)) {
+    const app = document.getElementById('app')!;
+    app.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:center;height:100vh;padding:2rem;text-align:center;">
+        <div>
+          <h1 style="color:#e74c3c;margin-bottom:1rem;">WebCodecs Not Supported</h1>
+          <p style="color:#aaa;max-width:480px;">
+            Your browser does not support the WebCodecs API, which is required for video decoding.
+            Please use a recent version of Chrome, Edge, or Opera.
+          </p>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
   const ui = buildUI();
   let ws: WebSocket | null = null;
-  let pc: RTCPeerConnection | null = null;
+  let decoder: VideoDecoder | null = null;
   let statsInterval: ReturnType<typeof setInterval> | null = null;
-  let prevBytesReceived = 0;
-  let prevTimestamp = 0;
   let state: ConnectionState = 'disconnected';
 
-  // -- Video setup
-  ui.video.autoplay = true;
-  ui.video.muted = true;
-  ui.video.playsInline = true;
+  // Stats tracking
+  let frameCount = 0;
+  let totalFrames = 0;
+  let bytesReceived = 0;
+  let lastStatsTime = performance.now();
+  let lastWidth = 0;
+  let lastHeight = 0;
+  let currentResolution = '';
+  let firstFrameReceived = false;
+
+  // Canvas context
+  const ctx = ui.canvas.getContext('2d')!;
 
   // -- State management
   function setState(newState: ConnectionState, message?: string) {
@@ -181,55 +197,30 @@ function main() {
   // -- Stats collection
   function startStatsCollection() {
     stopStatsCollection();
-    prevBytesReceived = 0;
-    prevTimestamp = 0;
+    frameCount = 0;
+    totalFrames = 0;
+    bytesReceived = 0;
+    lastStatsTime = performance.now();
+    currentResolution = '';
 
-    statsInterval = setInterval(async () => {
-      if (!pc) return;
+    statsInterval = setInterval(() => {
+      const now = performance.now();
+      const elapsed = (now - lastStatsTime) / 1000;
 
-      try {
-        const report = await pc.getStats();
-        const stats: Partial<Stats> = {};
+      const fps = elapsed > 0 ? Math.round(frameCount / elapsed) : 0;
+      const kbps = elapsed > 0 ? Math.round((bytesReceived * 8) / 1000 / elapsed) : 0;
 
-        report.forEach((s) => {
-          if (s.type === 'inbound-rtp' && s.kind === 'video') {
-            // FPS
-            if (s.framesPerSecond !== undefined) {
-              stats.fps = s.framesPerSecond;
-            }
-            // Resolution
-            if (s.frameWidth && s.frameHeight) {
-              stats.resolution = `${s.frameWidth}×${s.frameHeight}`;
-            }
-            // Bitrate
-            const now = s.timestamp;
-            const bytes = s.bytesReceived || 0;
-            if (prevTimestamp > 0 && now > prevTimestamp) {
-              const deltaSec = (now - prevTimestamp) / 1000;
-              const deltaBytes = bytes - prevBytesReceived;
-              const kbps = ((deltaBytes * 8) / 1000 / deltaSec).toFixed(0);
-              stats.bitrate = `${kbps} kbps`;
-            }
-            prevBytesReceived = bytes;
-            prevTimestamp = now;
-          }
+      // Update DOM
+      const el = (id: string) => document.getElementById(id);
+      el('statFps')!.textContent = String(fps);
+      if (currentResolution) el('statRes')!.textContent = currentResolution;
+      el('statBitrate')!.textContent = `${kbps} kbps`;
+      el('statFrames')!.textContent = String(totalFrames);
 
-          if (s.type === 'candidate-pair' && s.state === 'succeeded') {
-            if (s.currentRoundTripTime !== undefined) {
-              stats.rtt = `${(s.currentRoundTripTime * 1000).toFixed(0)} ms`;
-            }
-          }
-        });
-
-        // Update DOM
-        const el = (id: string) => document.getElementById(id);
-        if (stats.fps !== undefined) el('statFps')!.textContent = String(stats.fps);
-        if (stats.resolution) el('statRes')!.textContent = stats.resolution;
-        if (stats.bitrate) el('statBitrate')!.textContent = stats.bitrate;
-        if (stats.rtt) el('statRtt')!.textContent = stats.rtt;
-      } catch {
-        // stats collection failed silently
-      }
+      // Reset per-interval counters
+      frameCount = 0;
+      bytesReceived = 0;
+      lastStatsTime = now;
     }, 1000);
   }
 
@@ -239,23 +230,66 @@ function main() {
       statsInterval = null;
     }
     // Reset stat values
-    const ids = ['statFps', 'statRes', 'statBitrate', 'statRtt'];
+    const ids = ['statFps', 'statRes', 'statBitrate', 'statFrames'];
     ids.forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.textContent = '—';
     });
   }
 
+  // -- Create VideoDecoder
+  function createDecoder(): VideoDecoder {
+    const d = new VideoDecoder({
+      output: (frame: VideoFrame) => {
+        // Update canvas dimensions if resolution changed
+        if (frame.displayWidth !== lastWidth || frame.displayHeight !== lastHeight) {
+          lastWidth = frame.displayWidth;
+          lastHeight = frame.displayHeight;
+          ui.canvas.width = frame.displayWidth;
+          ui.canvas.height = frame.displayHeight;
+          currentResolution = `${frame.displayWidth}×${frame.displayHeight}`;
+        }
+
+        // Draw frame to canvas
+        ctx.drawImage(frame, 0, 0, ui.canvas.width, ui.canvas.height);
+        frame.close();
+
+        // Update stats
+        frameCount++;
+        totalFrames++;
+
+        // Transition to streaming on first frame
+        if (!firstFrameReceived) {
+          firstFrameReceived = true;
+          setState('streaming');
+          startStatsCollection();
+        }
+      },
+      error: (e: Error) => {
+        console.error('[decoder] error:', e);
+      },
+    });
+
+    // Configure decoder for H264 baseline profile, level 3.1
+    d.configure({
+      codec: 'avc1.42C01F',
+      optimizeForLatency: true,
+    });
+
+    return d;
+  }
+
   // -- Cleanup
   function cleanup() {
     stopStatsCollection();
 
-    if (pc) {
-      pc.ontrack = null;
-      pc.onicecandidate = null;
-      pc.oniceconnectionstatechange = null;
-      pc.close();
-      pc = null;
+    if (decoder) {
+      try {
+        decoder.close();
+      } catch {
+        // decoder may already be closed
+      }
+      decoder = null;
     }
 
     if (ws) {
@@ -267,7 +301,17 @@ function main() {
       ws = null;
     }
 
-    ui.video.srcObject = null;
+    // Reset canvas
+    ctx.clearRect(0, 0, ui.canvas.width, ui.canvas.height);
+
+    // Reset stats tracking
+    frameCount = 0;
+    totalFrames = 0;
+    bytesReceived = 0;
+    lastWidth = 0;
+    lastHeight = 0;
+    currentResolution = '';
+    firstFrameReceived = false;
   }
 
   // -- Connect
@@ -293,62 +337,17 @@ function main() {
       return;
     }
 
+    ws.binaryType = 'arraybuffer';
+
     ws.onopen = () => {
       console.log('[ws] connected');
     };
 
-    ws.onmessage = async (event) => {
-      let msg: { type: string; id?: string; sdp?: string; candidate?: string; message?: string };
-      try {
-        msg = JSON.parse(event.data as string);
-      } catch {
-        console.warn('[ws] failed to parse message');
-        return;
-      }
-
-      console.log('[ws] ←', msg.type);
-
-      switch (msg.type) {
-        case 'welcome':
-          console.log('[ws] session id:', msg.id);
-          setState('connected');
-          break;
-
-        case 'publisher_online':
-          console.log('[ws] publisher is online');
-          setState('connected', 'Publisher online — waiting for offer');
-          break;
-
-        case 'publisher_offline':
-          console.log('[ws] publisher went offline');
-          // Close peer connection but keep WebSocket
-          if (pc) {
-            pc.close();
-            pc = null;
-          }
-          stopStatsCollection();
-          ui.video.srcObject = null;
-          setState('connected', 'Camera offline');
-          // Show offline overlay
-          ui.overlay.classList.remove('video-wrap__overlay--hidden');
-          ui.overlay.classList.add('video-wrap__overlay--offline');
-          ui.overlayIcon.innerHTML = OFFLINE_ICON;
-          ui.overlayText.textContent = 'Camera Offline';
-          ui.overlayText.className = 'video-wrap__overlay-text';
-          break;
-
-        case 'offer':
-          await handleOffer(msg.sdp!);
-          break;
-
-        case 'candidate':
-          await handleRemoteCandidate(msg.candidate!);
-          break;
-
-        case 'error':
-          console.error('[ws] server error:', msg.message);
-          setState('error', msg.message || 'Server error');
-          break;
+    ws.onmessage = (event: MessageEvent) => {
+      if (event.data instanceof ArrayBuffer) {
+        handleBinaryMessage(event.data);
+      } else {
+        handleTextMessage(event.data as string);
       }
     };
 
@@ -365,83 +364,101 @@ function main() {
     };
   }
 
-  // -- Handle SDP Offer
-  async function handleOffer(sdp: string) {
-    console.log('[rtc] received offer');
+  // -- Handle binary WebSocket message (H264 video data)
+  function handleBinaryMessage(data: ArrayBuffer) {
+    if (data.byteLength < 5) {
+      console.warn('[ws] binary message too short:', data.byteLength);
+      return;
+    }
 
-    pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    // Ensure decoder exists
+    if (!decoder || decoder.state === 'closed') {
+      decoder = createDecoder();
+    }
+
+    // Skip frames if decoder queue is backing up
+    if (decoder.decodeQueueSize > 5) {
+      console.warn('[decoder] queue overflow, skipping frame (queue size:', decoder.decodeQueueSize, ')');
+      return;
+    }
+
+    const view = new DataView(data);
+    const flags = view.getUint8(0);
+    const timestamp = view.getUint32(1, false); // big-endian
+    const isKeyframe = (flags & 0x01) !== 0;
+    const h264Data = new Uint8Array(data, 5); // skip 5-byte header
+
+    // Track bytes for bitrate calculation
+    bytesReceived += data.byteLength;
+
+    const chunk = new EncodedVideoChunk({
+      type: isKeyframe ? 'key' : 'delta',
+      timestamp: timestamp * 1000, // convert ms to microseconds
+      data: h264Data,
     });
 
-    // ICE candidates → send to server
-    pc.onicecandidate = (event) => {
-      if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({
-            type: 'candidate',
-            candidate: JSON.stringify(event.candidate.toJSON()),
-          })
-        );
-      }
-    };
-
-    // Track received → attach to video
-    pc.ontrack = (event) => {
-      console.log('[rtc] track received:', event.track.kind);
-      if (event.streams && event.streams[0]) {
-        ui.video.srcObject = event.streams[0];
-      } else {
-        const stream = new MediaStream();
-        stream.addTrack(event.track);
-        ui.video.srcObject = stream;
-      }
-      setState('streaming');
-      startStatsCollection();
-    };
-
-    // ICE connection state
-    pc.oniceconnectionstatechange = () => {
-      console.log('[rtc] ICE state:', pc?.iceConnectionState);
-      if (
-        pc?.iceConnectionState === 'failed' ||
-        pc?.iceConnectionState === 'disconnected'
-      ) {
-        console.warn('[rtc] ICE failed or disconnected');
-      }
-    };
-
-    // Set remote offer
-    await pc.setRemoteDescription(
-      new RTCSessionDescription({ type: 'offer', sdp })
-    );
-
-    // Create and send answer
-    const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
-
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          type: 'answer',
-          sdp: answer.sdp,
-        })
-      );
-      console.log('[rtc] answer sent');
+    try {
+      decoder.decode(chunk);
+    } catch (e) {
+      console.error('[decoder] decode error:', e);
     }
   }
 
-  // -- Handle remote ICE candidate
-  async function handleRemoteCandidate(candidateStr: string) {
-    if (!pc) {
-      console.warn('[rtc] no peer connection for candidate');
+  // -- Handle text WebSocket message (JSON control)
+  function handleTextMessage(data: string) {
+    let msg: { type: string; id?: string; message?: string };
+    try {
+      msg = JSON.parse(data);
+    } catch {
+      console.warn('[ws] failed to parse message');
       return;
     }
-    try {
-      const candidate = JSON.parse(candidateStr);
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      console.log('[rtc] added remote candidate');
-    } catch (err) {
-      console.warn('[rtc] failed to add candidate:', err);
+
+    console.log('[ws] ←', msg.type);
+
+    switch (msg.type) {
+      case 'welcome':
+        console.log('[ws] session id:', msg.id);
+        setState('connected');
+        break;
+
+      case 'publisher_online':
+        console.log('[ws] publisher is online');
+        // Create decoder in preparation for video data
+        if (!decoder || decoder.state === 'closed') {
+          decoder = createDecoder();
+        }
+        firstFrameReceived = false;
+        setState('connected', 'Publisher online — waiting for video');
+        break;
+
+      case 'publisher_offline':
+        console.log('[ws] publisher went offline');
+        // Close decoder but keep WebSocket
+        if (decoder) {
+          try {
+            decoder.close();
+          } catch {
+            // decoder may already be closed
+          }
+          decoder = null;
+        }
+        stopStatsCollection();
+        ctx.clearRect(0, 0, ui.canvas.width, ui.canvas.height);
+        firstFrameReceived = false;
+        setState('connected', 'Camera offline');
+        // Show offline overlay
+        ui.overlay.classList.remove('video-wrap__overlay--hidden');
+        ui.overlay.classList.add('video-wrap__overlay--offline');
+        ui.overlayIcon.innerHTML = OFFLINE_ICON;
+        ui.overlayText.textContent = 'Camera Offline';
+        ui.overlayText.className = 'video-wrap__overlay-text';
+        break;
+
+      case 'error':
+        console.error('[ws] server error:', msg.message);
+        setState('error', msg.message || 'Server error');
+        break;
     }
   }
 

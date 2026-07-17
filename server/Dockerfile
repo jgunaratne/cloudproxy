@@ -17,6 +17,7 @@ RUN apk --no-cache add ca-certificates
 WORKDIR /app
 COPY --from=builder /app/cloudproxy-server .
 
+# Cloud Run sets PORT=8080 via environment variable.
 EXPOSE 8080
 
 ENTRYPOINT ["./cloudproxy-server"]
