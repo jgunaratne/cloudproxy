@@ -13,6 +13,11 @@ cloudproxy-pi-client
 node_modules/
 dist/
 
+# Placeholder embed target so `go build` works from server/ without a
+# viewer build first; the root Dockerfile overwrites it with the real UI.
+!server/viewer/dist/
+!server/viewer/dist/index.html
+
 # IDE
 .vscode/
 .idea/

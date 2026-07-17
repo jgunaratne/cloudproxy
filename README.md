@@ -48,7 +48,13 @@ The Cloud Run service requires a **Google identity token** for IAM authenticatio
 
 ## Quick Start (Cloud Run — already deployed)
 
-### 1. Start the Viewer (Mac)
+### Option A: Open the Cloud Run URL directly
+
+**https://cloudproxy-server-530731599092.us-west1.run.app/** serves the viewer UI directly — no local setup needed. Enter the token and click Connect.
+
+This only works if the Cloud Run service is deployed with `--allow-unauthenticated` (see [Rebuilding After Code Changes](#rebuilding-after-code-changes)). If your org policy blocks `allUsers` invoker bindings, this URL will 403 at the IAM layer and you'll need Option B instead.
+
+### Option B: Run the Viewer locally (Mac)
 
 ```bash
 # One-time: ensure gcloud is authenticated
@@ -62,7 +68,9 @@ npm run dev
 
 Opens at **http://localhost:3000**. The Vite dev server proxies WebSocket connections to Cloud Run and injects your Google identity token automatically.
 
-### 2. Start the Pi Client (pidesk)
+### Start the Pi Client (pidesk)
+
+(Required either way — this is what actually publishes video.)
 
 **First time — cross-compile on Mac and copy to Pi:**
 
@@ -91,9 +99,9 @@ GCP_IDENTITY_TOKEN=$GCP_TOKEN \
 
 > **Tip:** For always-on use, set `GCP_IDENTITY_URL` instead so the Pi fetches tokens automatically via the GCE metadata server (requires a service account). See [Authentication & Tokens](#authentication--tokens).
 
-### 3. Watch the Stream
+### Watch the Stream
 
-1. Open **http://localhost:3000** in **Chrome or Edge** (Firefox/Safari don't support WebCodecs)
+1. Open **http://localhost:3000** (Option B) or the Cloud Run URL (Option A) in **Chrome or Edge** (Firefox/Safari don't support WebCodecs)
 2. Click **Connect** (default URL and token are pre-filled)
 3. Live video should appear with stats overlay
 
@@ -205,18 +213,38 @@ ping -c 2 google.com
 ### Server
 
 ```bash
-cd server
-# Local:
-go run .
-# Cloud Run:
+# Local (serves a placeholder page at "/"; only /ws matters for local dev):
+cd server && go run .
+```
+
+The Dockerfile for Cloud Run is at the **repo root** (not `server/Dockerfile`) so it
+can build the viewer UI and embed it into the Go binary via `go:embed`. Run
+`gcloud builds submit` from the repo root:
+
+```bash
+cd /path/to/cloudproxy   # repo root, not server/
+
+# Build and push image
 gcloud builds submit --tag gcr.io/hansel-487018/cloudproxy-server
+
+# Deploy to Cloud Run
+# --allow-unauthenticated: lets the viewer UI load and WebSocket connections
+# open directly from a browser (browsers can't send Authorization headers on
+# page loads or WS handshakes). The AUTH_TOKEN below is the real security
+# boundary. If your org policy blocks allUsers invoker bindings, this flag
+# will be rejected — fall back to Option B (run the viewer locally, which
+# authenticates via `gcloud auth print-identity-token` instead).
 gcloud run deploy cloudproxy-server \
   --image gcr.io/hansel-487018/cloudproxy-server \
   --region us-west1 --port 8080 \
+  --allow-unauthenticated \
   --set-env-vars AUTH_TOKEN=your-secret-token \
   --min-instances 1 --max-instances 1 \
   --session-affinity --timeout 3600
 ```
+
+After deploying, the viewer UI is served at:
+**https://cloudproxy-server-530731599092.us-west1.run.app/**
 
 ### Pi Client
 
@@ -235,7 +263,7 @@ ssh pidesk.local "sudo systemctl restart cloudproxy-pi.service"
 | Service URL | `https://cloudproxy-server-530731599092.us-west1.run.app` |
 | GCP Project | `hansel-487018` |
 | Region | `us-west1` |
-| Auth | Google identity token (org policy blocks `allUsers`) |
+| Auth | App-level `AUTH_TOKEN` if deployed with `--allow-unauthenticated`; otherwise Google identity token (needed if org policy blocks `allUsers`) |
 
 ## Troubleshooting
 
