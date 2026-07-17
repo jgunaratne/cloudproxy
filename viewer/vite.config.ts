@@ -5,6 +5,13 @@ const CLOUD_RUN_URL =
   process.env.CLOUD_RUN_URL ||
   'https://cloudproxy-server-530731599092.us-west1.run.app';
 
+function getIdentityToken(): string {
+  return execSync('gcloud auth print-identity-token 2>/dev/null', {
+    encoding: 'utf-8',
+    timeout: 10000,
+  }).trim();
+}
+
 /**
  * Vite plugin that proxies WebSocket connections to Cloud Run and
  * injects a Google identity token for IAM authentication.
@@ -16,13 +23,6 @@ const CLOUD_RUN_URL =
  * Also exposes GET /api/token for debugging.
  */
 function gcloudAuthPlugin(): Plugin {
-  function getIdentityToken(): string {
-    return execSync('gcloud auth print-identity-token 2>/dev/null', {
-      encoding: 'utf-8',
-      timeout: 10000,
-    }).trim();
-  }
-
   return {
     name: 'gcloud-auth',
     configureServer(server) {
