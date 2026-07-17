@@ -56,6 +56,7 @@ gcloud auth login
 
 cd viewer
 npm install    # first time only
+cp .env.example .env  # fill in CLOUD_RUN_URL and VITE_AUTH_TOKEN
 npm run dev
 ```
 
