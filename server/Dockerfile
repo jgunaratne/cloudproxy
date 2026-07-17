@@ -1,4 +1,6 @@
-# Build stage
+# Build stage (kept for local server-only builds; serves the viewer/dist
+# placeholder page since it doesn't build the UI. Not used for Cloud Run —
+# use the root Dockerfile for that, which embeds the real viewer UI.)
 FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
