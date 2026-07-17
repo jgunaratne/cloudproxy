@@ -1,7 +1,11 @@
-import { defineConfig, Plugin } from 'vite';
+import { defineConfig, loadEnv, Plugin } from 'vite';
 import { execSync } from 'child_process';
 
-const CLOUD_RUN_URL = process.env.CLOUD_RUN_URL;
+// Vite only injects VITE_-prefixed env vars automatically.
+// We need CLOUD_RUN_URL (no VITE_ prefix) at config time, so load .env explicitly.
+const env = loadEnv('development', process.cwd(), '' /* load ALL prefixes */);
+
+const CLOUD_RUN_URL = env.CLOUD_RUN_URL || process.env.CLOUD_RUN_URL;
 if (!CLOUD_RUN_URL) {
   throw new Error(
     'CLOUD_RUN_URL is not set. Copy viewer/.env.example to viewer/.env and fill in your values.',
