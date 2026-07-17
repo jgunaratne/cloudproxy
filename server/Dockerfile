@@ -1,4 +1,4 @@
-# Build stage
+# Build stage (kept for local server-only builds, not used for Cloud Run)
 FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
