@@ -75,6 +75,7 @@ type Server struct {
 	lastKeyframe []byte // most recent keyframe (binary msg with flag 0x01)
 
 	authToken string
+	minter    *TokenMinter // nil when token minting is disabled
 }
 
 func NewServer() *Server {
@@ -82,9 +83,14 @@ func NewServer() *Server {
 	if token == "" {
 		token = "cloudproxy-dev-token"
 	}
+	minter := NewTokenMinterFromEnv()
+	if minter != nil {
+		log.Printf("token minting enabled: sa=%s interval=%s", minter.SA, minter.Interval)
+	}
 	return &Server{
 		viewers:   make(map[string]*Viewer),
 		authToken: token,
+		minter:    minter,
 	}
 }
 
@@ -160,6 +166,14 @@ func (s *Server) handlePublisher(conn *websocket.Conn, id string) {
 
 	// Notify existing viewers that the publisher is online.
 	s.notifyViewers(ControlMessage{Type: "publisher_online"})
+
+	// Keep the publisher supplied with fresh IAP tokens for its future
+	// reconnects (see tokenmint.go).
+	if s.minter != nil {
+		stopMint := make(chan struct{})
+		defer close(stopMint)
+		go s.minter.deliverLoop(conn, stopMint)
+	}
 
 	defer func() {
 		log.Printf("Publisher disconnected: %s", id)
