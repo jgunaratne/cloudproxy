@@ -51,6 +51,8 @@ The Cloud Run service sits behind **Identity-Aware Proxy** (org policy blocks `a
   ```
   This signs as `cloudproxy-pi@hansel-487018.iam.gserviceaccount.com`, which has `iap.httpsResourceAccessor`. Your user needs `roles/iam.serviceAccountTokenCreator` on that SA, plus a one-time `gcloud auth application-default login`.
 
+  Since tokens expire after ~1 hour, don't paste them by hand — install the **automatic token pusher** (see [Automatic IAP token refresh](#automatic-iap-token-refresh-mac--pi)) so the Mac keeps the Pi supplied with fresh tokens.
+
 > For **local development** (server running on your Mac), neither component needs any Google token — only `AUTH_TOKEN` is required.
 
 ## Quick Start (Cloud Run — already deployed)
@@ -86,23 +88,32 @@ GOOS=linux GOARCH=arm64 go build -o cloudproxy-pi-client .
 scp cloudproxy-pi-client pidesk.local:~/
 ```
 
+**Set up automatic IAP token refresh (Mac → Pi):**
+
+<a id="automatic-iap-token-refresh-mac--pi"></a>
+IAP tokens expire after ~1 hour, and the org's IAM policy means the Pi can't mint its own (that requires either a downloadable service-account key or a metadata server, neither of which the Pi has). Instead, the Mac — which already has `gcloud` credentials — mints and pushes tokens on a schedule:
+
+```bash
+# One-time, on the Mac. Requires passwordless (key-based) SSH to the Pi.
+./scripts/install-token-pusher.sh        # or: PI_HOST=mypi.local ./scripts/install-token-pusher.sh
+```
+
+This installs a launchd agent that runs `scripts/push-token-to-pi.sh` every 45 minutes: it mints a token via `mint-iap-token.sh` and writes it atomically to `~/.cloudproxy/iap-token` on the Pi. Logs go to `~/Library/Logs/cloudproxy-token-pusher.log`. To push once manually, just run `./scripts/push-token-to-pi.sh`.
+
 **Run on the Pi:**
 
 ```bash
 ssh pidesk.local
 
-# Mint an IAP-compatible token (run this on your Mac, paste into the Pi shell).
-# Tokens expire after ~1 hour — re-run this if the connection drops with a 401.
-GCP_TOKEN=$(./scripts/mint-iap-token.sh)
-echo $GCP_TOKEN
-
 SIGNAL_URL=wss://cloudproxy-server-530731599092.us-west1.run.app/ws \
 AUTH_TOKEN=your-secret-token \
-GCP_IDENTITY_TOKEN=$GCP_TOKEN \
+GCP_IDENTITY_TOKEN_FILE=$HOME/.cloudproxy/iap-token \
 ~/cloudproxy-pi-client
 ```
 
-> **Tip:** For always-on use, set `GCP_IDENTITY_URL` instead so the Pi fetches tokens automatically via the GCE metadata server (requires a service account). See [Authentication & Tokens](#authentication--tokens).
+The client re-reads the token file on every reconnect: when a token expires, Cloud Run drops the connection, and the automatic 3-second reconnect picks up the fresh token the Mac pushed in the meantime.
+
+> **Caveats:** the Mac must be awake and on a network that can reach the Pi for the pusher to fire (launchd catches up after sleep). For a one-off session without the pusher, you can still mint manually with `GCP_IDENTITY_TOKEN=$(./scripts/mint-iap-token.sh)` and pass that instead. If the Pi ever runs inside GCP, set `GCP_IDENTITY_URL` to use the metadata server directly.
 
 ### Watch the Stream
 
@@ -155,6 +166,9 @@ Open **http://localhost:3000**, change the server URL to `ws://localhost:8080/ws
 | `VIDEO_HEIGHT` | `720` | Capture height |
 | `VIDEO_FPS` | `30` | Framerate |
 | `VIDEO_BITRATE` | `2500k` | H264 encoding bitrate |
+| `GCP_IDENTITY_TOKEN_FILE` | _(unset)_ | File holding an IAP token, re-read on every reconnect (kept fresh by `scripts/push-token-to-pi.sh`) |
+| `GCP_IDENTITY_TOKEN` | _(unset)_ | A pre-fetched IAP token, used as-is (expires ~1 hour) |
+| `GCP_IDENTITY_URL` | _(unset)_ | Cloud Run URL as token audience; fetches tokens from the GCE metadata server (GCP-hosted clients only) |
 
 ## Auto-Start Pi Client on Boot
 
@@ -174,6 +188,7 @@ Wants=network-online.target
 Type=simple
 Environment=SIGNAL_URL=wss://cloudproxy-server-530731599092.us-west1.run.app/ws
 Environment=AUTH_TOKEN=your-secret-token
+Environment=GCP_IDENTITY_TOKEN_FILE=/home/pi/.cloudproxy/iap-token
 Environment=VIDEO_DEVICE=/dev/video0
 Environment=VIDEO_WIDTH=1280
 Environment=VIDEO_HEIGHT=720

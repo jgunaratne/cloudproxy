@@ -34,6 +34,7 @@ type Config struct {
 	VideoBitrate     string
 	GCPIdentityURL   string // Cloud Run service URL for identity token audience (optional, uses metadata server)
 	GCPIdentityToken string // Pre-fetched identity token (optional, bypasses metadata server)
+	GCPTokenFile     string // Path to a file holding the identity token, re-read on every reconnect (optional)
 }
 
 // SignalMessage represents a JSON message exchanged over the signaling WebSocket.
@@ -118,6 +119,7 @@ func parseConfig() Config {
 	flag.StringVar(&cfg.VideoBitrate, "video-bitrate", envOrDefault("VIDEO_BITRATE", "2500k"), "H264 encoding bitrate")
 	flag.StringVar(&cfg.GCPIdentityURL, "gcp-identity-url", envOrDefault("GCP_IDENTITY_URL", ""), "Cloud Run service URL for identity token audience (e.g. https://cloudproxy-server-xxx.run.app)")
 	flag.StringVar(&cfg.GCPIdentityToken, "gcp-identity-token", envOrDefault("GCP_IDENTITY_TOKEN", ""), "Pre-fetched Google identity token (bypasses metadata server)")
+	flag.StringVar(&cfg.GCPTokenFile, "gcp-identity-token-file", envOrDefault("GCP_IDENTITY_TOKEN_FILE", ""), "File containing a Google identity token, re-read on every reconnect (e.g. pushed by scripts/push-token-to-pi.sh)")
 	flag.Parse()
 
 	return cfg
@@ -185,7 +187,19 @@ func runSession(ctx context.Context, cfg Config) error {
 	headers := http.Header{}
 
 	// Authenticate to Cloud Run if identity token or identity URL is configured.
-	if cfg.GCPIdentityToken != "" {
+	if cfg.GCPTokenFile != "" {
+		// Re-read on every connection attempt so an external refresher
+		// (scripts/push-token-to-pi.sh) can rotate the ~1h IAP token
+		// without restarting this process: an expired token just drops
+		// the session, and the reconnect picks up the fresh file.
+		data, err := os.ReadFile(cfg.GCPTokenFile)
+		if err != nil {
+			log.Printf("warning: reading identity token file: %v (continuing without it)", err)
+		} else {
+			headers.Set("Authorization", "Bearer "+strings.TrimSpace(string(data)))
+			log.Printf("using GCP identity token from %s for Cloud Run auth", cfg.GCPTokenFile)
+		}
+	} else if cfg.GCPIdentityToken != "" {
 		// Use pre-fetched token directly (e.g. from `gcloud auth print-identity-token`).
 		headers.Set("Authorization", "Bearer "+cfg.GCPIdentityToken)
 		log.Printf("using pre-fetched GCP identity token for Cloud Run auth")
