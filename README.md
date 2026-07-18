@@ -51,6 +51,8 @@ The Cloud Run service sits behind **Identity-Aware Proxy** (org policy blocks `a
   ```
   This signs as `cloudproxy-pi@hansel-487018.iam.gserviceaccount.com`, which has `iap.httpsResourceAccessor`. Your user needs `roles/iam.serviceAccountTokenCreator` on that SA, plus a one-time `gcloud auth application-default login`.
 
+  Since tokens expire after ~1 hour, don't paste them by hand — the **Cloud Run server mints and delivers fresh tokens to the Pi automatically** while it's connected (see [Automatic IAP token refresh](#automatic-iap-token-refresh-mac--pi)). The Mac only supplies the very first token (or re-bootstraps after the Pi has been offline for over an hour) via `scripts/push-token-to-pi.sh`.
+
 > For **local development** (server running on your Mac), neither component needs any Google token — only `AUTH_TOKEN` is required.
 
 ## Quick Start (Cloud Run — already deployed)
@@ -86,23 +88,35 @@ GOOS=linux GOARCH=arm64 go build -o cloudproxy-pi-client .
 scp cloudproxy-pi-client pidesk.local:~/
 ```
 
+**Automatic IAP token refresh (server → Pi):**
+
+<a id="automatic-iap-token-refresh-mac--pi"></a>
+IAP tokens expire after ~1 hour, and the org's IAM policy means the Pi can't mint its own (that requires either a downloadable service-account key or a metadata server, neither of which the Pi has). Instead, the **Cloud Run server mints tokens on the Pi's behalf**: while the Pi is connected, the server periodically signs a fresh IAP JWT (using its own runtime service account) and sends it down the signaling WebSocket. The Pi saves it to the token file and uses it on its next reconnect — so once the Pi has connected a first time, it stays authenticated indefinitely with no Mac (or any other machine) involved.
+
+This requires the server to be deployed with `TOKEN_MINT_SA` / `TOKEN_MINT_AUDIENCE` and a one-time IAM grant — see [Rebuilding After Code Changes → Server](#server).
+
+**Bootstrap — getting the *first* token onto the Pi:**
+
+The chain only breaks if the Pi stays disconnected for over an hour (its newest saved token expired, and IAP won't let it connect to receive another). For the first run — or to re-bootstrap after a long outage — push one token from the Mac:
+
+```bash
+./scripts/push-token-to-pi.sh            # one-shot: mints and writes ~/.cloudproxy/iap-token on the Pi via SSH
+```
+
+(Optionally `./scripts/install-token-pusher.sh` installs a launchd agent that does this every 45 minutes as a belt-and-suspenders fallback, but with server-side minting it's not needed for normal operation.)
+
 **Run on the Pi:**
 
 ```bash
 ssh pidesk.local
 
-# Mint an IAP-compatible token (run this on your Mac, paste into the Pi shell).
-# Tokens expire after ~1 hour — re-run this if the connection drops with a 401.
-GCP_TOKEN=$(./scripts/mint-iap-token.sh)
-echo $GCP_TOKEN
-
 SIGNAL_URL=wss://cloudproxy-server-530731599092.us-west1.run.app/ws \
 AUTH_TOKEN=your-secret-token \
-GCP_IDENTITY_TOKEN=$GCP_TOKEN \
+GCP_IDENTITY_TOKEN_FILE=$HOME/.cloudproxy/iap-token \
 ~/cloudproxy-pi-client
 ```
 
-> **Tip:** For always-on use, set `GCP_IDENTITY_URL` instead so the Pi fetches tokens automatically via the GCE metadata server (requires a service account). See [Authentication & Tokens](#authentication--tokens).
+The client re-reads the token file on every connection attempt: when a token expires, Cloud Run drops the connection, and the automatic 3-second reconnect uses the freshest token the server delivered mid-session.
 
 ### Watch the Stream
 
@@ -155,6 +169,9 @@ Open **http://localhost:3000**, change the server URL to `ws://localhost:8080/ws
 | `VIDEO_HEIGHT` | `720` | Capture height |
 | `VIDEO_FPS` | `30` | Framerate |
 | `VIDEO_BITRATE` | `2500k` | H264 encoding bitrate |
+| `GCP_IDENTITY_TOKEN_FILE` | _(unset)_ | File holding an IAP token, re-read on every reconnect (kept fresh by `scripts/push-token-to-pi.sh`) |
+| `GCP_IDENTITY_TOKEN` | _(unset)_ | A pre-fetched IAP token, used as-is (expires ~1 hour) |
+| `GCP_IDENTITY_URL` | _(unset)_ | Cloud Run URL as token audience; fetches tokens from the GCE metadata server (GCP-hosted clients only) |
 
 ## Auto-Start Pi Client on Boot
 
@@ -174,6 +191,7 @@ Wants=network-online.target
 Type=simple
 Environment=SIGNAL_URL=wss://cloudproxy-server-530731599092.us-west1.run.app/ws
 Environment=AUTH_TOKEN=your-secret-token
+Environment=GCP_IDENTITY_TOKEN_FILE=/home/pi/.cloudproxy/iap-token
 Environment=VIDEO_DEVICE=/dev/video0
 Environment=VIDEO_WIDTH=1280
 Environment=VIDEO_HEIGHT=720
@@ -232,16 +250,34 @@ cd /path/to/cloudproxy   # repo root, not server/
 # Build and push image
 gcloud builds submit --tag gcr.io/hansel-487018/cloudproxy-server
 
+# One-time: let the server's runtime service account mint IAP tokens for the
+# Pi (see "Automatic IAP token refresh"). The default runtime SA on this
+# project is the compute default; confirm with:
+#   gcloud run services describe cloudproxy-server --region us-west1 \
+#     --format='value(spec.template.spec.serviceAccountName)'
+gcloud iam service-accounts add-iam-policy-binding \
+  cloudproxy-pi@hansel-487018.iam.gserviceaccount.com \
+  --member=serviceAccount:530731599092-compute@developer.gserviceaccount.com \
+  --role=roles/iam.serviceAccountTokenCreator
+
 # Deploy to Cloud Run. Access control is handled by IAP (already enabled on
 # the service via `gcloud beta run services update cloudproxy-server --iap`);
 # org policy blocks --allow-unauthenticated, so don't bother with it.
+# TOKEN_MINT_SA/TOKEN_MINT_AUDIENCE enable server-side IAP token minting for
+# the Pi.
 gcloud run deploy cloudproxy-server \
   --image gcr.io/hansel-487018/cloudproxy-server \
   --region us-west1 --port 8080 \
-  --set-env-vars AUTH_TOKEN=your-secret-token \
+  --set-env-vars "AUTH_TOKEN=your-secret-token,TOKEN_MINT_SA=cloudproxy-pi@hansel-487018.iam.gserviceaccount.com,TOKEN_MINT_AUDIENCE=https://cloudproxy-server-530731599092.us-west1.run.app/*" \
   --min-instances 1 --max-instances 1 \
   --session-affinity --timeout 3600
 ```
+
+| Server env var | Default | Description |
+|----------------|---------|-------------|
+| `TOKEN_MINT_SA` | _(unset — minting disabled)_ | Service account to sign IAP JWTs as (must have `iap.httpsResourceAccessor`) |
+| `TOKEN_MINT_AUDIENCE` | _(unset)_ | IAP audience: `https://<service-url>/*` |
+| `TOKEN_MINT_INTERVAL` | `30m` | How often to deliver a fresh token to the connected publisher |
 
 After deploying, the viewer UI is served at:
 **https://cloudproxy-server-530731599092.us-west1.run.app/**
