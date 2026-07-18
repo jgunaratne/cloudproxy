@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -83,13 +84,14 @@ func main() {
 	}()
 
 	// Main reconnection loop.
+	cache := &tokenCache{}
 	for {
 		if ctx.Err() != nil {
 			log.Printf("context cancelled, exiting")
 			return
 		}
 
-		err := runSession(ctx, cfg)
+		err := runSession(ctx, cfg, cache)
 		if ctx.Err() != nil {
 			log.Printf("session ended due to shutdown")
 			return
@@ -132,6 +134,74 @@ func envOrDefault(key, defaultVal string) string {
 	return defaultVal
 }
 
+// tokenCache holds the newest identity token delivered by the server
+// over the signaling WebSocket, surviving across sessions within this
+// process. The token file (if configured) is the durable copy; this
+// covers the case where no file is configured.
+type tokenCache struct {
+	mu    sync.Mutex
+	token string
+}
+
+func (c *tokenCache) set(token string) {
+	c.mu.Lock()
+	c.token = token
+	c.mu.Unlock()
+}
+
+func (c *tokenCache) get() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.token
+}
+
+// writeTokenFile writes the token atomically (temp file + rename) so a
+// concurrent reader never sees a partial token.
+func writeTokenFile(path, token string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(token+"\n"), 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// resolveIdentityToken picks the identity token for the next connection
+// attempt: the token file (freshest — written by both this process and
+// any external pusher), then the in-memory cache, then a static token
+// from the environment, then the GCE metadata server.
+func resolveIdentityToken(cfg Config, cache *tokenCache) string {
+	if cfg.GCPTokenFile != "" {
+		data, err := os.ReadFile(cfg.GCPTokenFile)
+		if err != nil {
+			log.Printf("warning: reading identity token file: %v", err)
+		} else if token := strings.TrimSpace(string(data)); token != "" {
+			log.Printf("using GCP identity token from %s", cfg.GCPTokenFile)
+			return token
+		}
+	}
+	if token := cache.get(); token != "" {
+		log.Printf("using GCP identity token received from server")
+		return token
+	}
+	if cfg.GCPIdentityToken != "" {
+		log.Printf("using pre-fetched GCP identity token from environment")
+		return cfg.GCPIdentityToken
+	}
+	if cfg.GCPIdentityURL != "" {
+		token, err := fetchGCPIdentityToken(cfg.GCPIdentityURL)
+		if err != nil {
+			log.Printf("warning: failed to fetch GCP identity token: %v (continuing without it)", err)
+			return ""
+		}
+		log.Printf("using GCP identity token from metadata server")
+		return token
+	}
+	return ""
+}
+
 // fetchGCPIdentityToken fetches a Google Cloud identity token from the
 // GCE metadata server. The audience should be the Cloud Run service URL.
 // This works when running on GCE, Cloud Run, GKE, or any environment
@@ -170,7 +240,7 @@ func fetchGCPIdentityToken(audience string) (string, error) {
 
 // runSession executes a single signaling + streaming session.
 // It returns when the session ends (error or disconnect).
-func runSession(ctx context.Context, cfg Config) error {
+func runSession(ctx context.Context, cfg Config, cache *tokenCache) error {
 	// Build the signaling URL with query parameters.
 	u, err := url.Parse(cfg.SignalURL)
 	if err != nil {
@@ -186,32 +256,12 @@ func runSession(ctx context.Context, cfg Config) error {
 	// Build HTTP headers for WebSocket dial.
 	headers := http.Header{}
 
-	// Authenticate to Cloud Run if identity token or identity URL is configured.
-	if cfg.GCPTokenFile != "" {
-		// Re-read on every connection attempt so an external refresher
-		// (scripts/push-token-to-pi.sh) can rotate the ~1h IAP token
-		// without restarting this process: an expired token just drops
-		// the session, and the reconnect picks up the fresh file.
-		data, err := os.ReadFile(cfg.GCPTokenFile)
-		if err != nil {
-			log.Printf("warning: reading identity token file: %v (continuing without it)", err)
-		} else {
-			headers.Set("Authorization", "Bearer "+strings.TrimSpace(string(data)))
-			log.Printf("using GCP identity token from %s for Cloud Run auth", cfg.GCPTokenFile)
-		}
-	} else if cfg.GCPIdentityToken != "" {
-		// Use pre-fetched token directly (e.g. from `gcloud auth print-identity-token`).
-		headers.Set("Authorization", "Bearer "+cfg.GCPIdentityToken)
-		log.Printf("using pre-fetched GCP identity token for Cloud Run auth")
-	} else if cfg.GCPIdentityURL != "" {
-		// Fetch from GCE metadata server (works on GCE, Cloud Run, GKE).
-		token, err := fetchGCPIdentityToken(cfg.GCPIdentityURL)
-		if err != nil {
-			log.Printf("warning: failed to fetch GCP identity token: %v (continuing without it)", err)
-		} else {
-			headers.Set("Authorization", "Bearer "+token)
-			log.Printf("using GCP identity token from metadata server for Cloud Run auth")
-		}
+	// Authenticate to Cloud Run. The token is re-resolved on every
+	// connection attempt: an expired token just drops the session, and
+	// the reconnect uses the freshest one available (delivered by the
+	// server mid-session, pushed externally, or from the environment).
+	if token := resolveIdentityToken(cfg, cache); token != "" {
+		headers.Set("Authorization", "Bearer "+token)
 	}
 
 	wsConn, _, err := websocket.DefaultDialer.Dial(u.String(), headers)
@@ -241,10 +291,23 @@ func runSession(ctx context.Context, cfg Config) error {
 
 	log.Printf("ffmpeg started, pid=%d", ffmpegCmd.Process.Pid)
 
-	// Read from WebSocket in background to detect disconnect.
+	// Read from WebSocket in background to detect disconnect and to
+	// receive fresh identity tokens the server mints for our reconnects.
+	onToken := func(token string) {
+		cache.set(token)
+		if cfg.GCPTokenFile == "" {
+			log.Printf("received fresh identity token from server (in-memory only; set GCP_IDENTITY_TOKEN_FILE to survive restarts)")
+			return
+		}
+		if err := writeTokenFile(cfg.GCPTokenFile, token); err != nil {
+			log.Printf("warning: saving identity token to %s: %v", cfg.GCPTokenFile, err)
+		} else {
+			log.Printf("received fresh identity token from server, saved to %s", cfg.GCPTokenFile)
+		}
+	}
 	wsDone := make(chan error, 1)
 	go func() {
-		wsDone <- readWebSocket(wsConn)
+		wsDone <- readWebSocket(wsConn, onToken)
 	}()
 
 	// Stream H264 frames over the WebSocket.
@@ -264,9 +327,9 @@ func runSession(ctx context.Context, cfg Config) error {
 	}
 }
 
-// readWebSocket reads messages from the WebSocket to detect disconnection.
-// The server won't send much after welcome; this mainly detects close.
-func readWebSocket(wsConn *websocket.Conn) error {
+// readWebSocket reads messages from the WebSocket to detect disconnection
+// and dispatch control messages (notably "token" refreshes from the server).
+func readWebSocket(wsConn *websocket.Conn, onToken func(string)) error {
 	for {
 		_, raw, err := wsConn.ReadMessage()
 		if err != nil {
@@ -280,6 +343,10 @@ func readWebSocket(wsConn *websocket.Conn) error {
 		}
 
 		switch msg.Type {
+		case "token":
+			if msg.Message != "" {
+				onToken(msg.Message)
+			}
 		case "error":
 			log.Printf("server error: %s", msg.Message)
 		default:
