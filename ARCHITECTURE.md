@@ -221,7 +221,7 @@ No Pion/WebRTC dependencies. Pure WebSocket relay.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | HTTP server port (Cloud Run sets this automatically) |
-| `AUTH_TOKEN` | `cloudproxy-dev-token` | Shared secret for WebSocket auth |
+| `AUTH_TOKEN` | `cloudproxy-dev-token` (local only; required on Cloud Run) | Shared secret for WebSocket auth |
 
 ### Key Server State
 
@@ -839,7 +839,7 @@ sudo certbot --nginx -d cloudproxy.yourdomain.com
 | Cross-compile pi-client | ✅ Done | `GOOS=linux GOARCH=arm64 go build` → SCP to Pi |
 | Local end-to-end test | ✅ Done | Pi → Mac server → Mac browser, 30fps 720p working |
 | Publisher reconnection | ✅ Done | Server replaces stale publishers instead of rejecting |
-| Cloud Run deployment | ✅ Done | `hansel-487018` / `us-west1` / revision `cloudproxy-server-00007-7rb` |
+| Cloud Run deployment | ✅ Done | `YOUR_PROJECT_ID` / `us-west1` / revision `cloudproxy-server-00007-7rb` |
 | Cloud Run auth proxy | ✅ Done | Vite dev server proxies WS + injects Google identity token |
 | DNS/domain | ⏳ TODO | Optional — can use Cloud Run default URL initially |
 
@@ -847,8 +847,8 @@ sudo certbot --nginx -d cloudproxy.yourdomain.com
 
 | Setting | Value |
 |---------|-------|
-| Service URL | `https://cloudproxy-server-530731599092.us-west1.run.app` |
-| GCP Project | `hansel-487018` |
+| Service URL | `https://cloudproxy-server-YOUR_PROJECT_NUMBER.us-west1.run.app` |
+| GCP Project | `YOUR_PROJECT_ID` |
 | Region | `us-west1` |
 | AUTH_TOKEN | `your-secret-token` |
 | Min instances | 1 (always warm) |
@@ -872,7 +872,7 @@ require a valid Google identity token in the `Authorization: Bearer` header.
 ```
 Pi (guest WiFi)
     ↓ WebSocket binary (H264 Annex B)
-Cloud Run (wss://cloudproxy-server-530731599092.us-west1.run.app/ws)
+Cloud Run (wss://cloudproxy-server-YOUR_PROJECT_NUMBER.us-west1.run.app/ws)
     ↓ WebSocket binary (H264 Annex B, forwarded)
 Vite dev server (localhost:3000 → proxies /ws to Cloud Run + injects auth)
     ↓
@@ -893,7 +893,7 @@ cd viewer && npm run dev
 
 # Terminal 2: Pi client (on the Pi via SSH)
 # Option A: Direct (if Pi has gcloud configured)
-SIGNAL_URL=wss://cloudproxy-server-530731599092.us-west1.run.app/ws AUTH_TOKEN=your-secret-token ~/cloudproxy-pi-client
+SIGNAL_URL=wss://cloudproxy-server-YOUR_PROJECT_NUMBER.us-west1.run.app/ws AUTH_TOKEN=your-secret-token ~/cloudproxy-pi-client
 # Option B: Via gcloud proxy tunnel
 gcloud run services proxy cloudproxy-server --region=us-west1 --port=8080
 SIGNAL_URL=ws://localhost:8080/ws AUTH_TOKEN=your-secret-token ~/cloudproxy-pi-client

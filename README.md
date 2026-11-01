@@ -49,7 +49,7 @@ The Cloud Run service sits behind **Identity-Aware Proxy** (org policy blocks `a
   ```bash
   GCP_IDENTITY_TOKEN=$(./scripts/mint-iap-token.sh)   # valid 1 hour
   ```
-  This signs as `cloudproxy-pi@hansel-487018.iam.gserviceaccount.com`, which has `iap.httpsResourceAccessor`. Your user needs `roles/iam.serviceAccountTokenCreator` on that SA, plus a one-time `gcloud auth application-default login`.
+  This signs as `cloudproxy-pi@YOUR_PROJECT_ID.iam.gserviceaccount.com`, which has `iap.httpsResourceAccessor`. Your user needs `roles/iam.serviceAccountTokenCreator` on that SA, plus a one-time `gcloud auth application-default login`.
 
   Since tokens expire after ~1 hour, don't paste them by hand — the **Cloud Run server mints and delivers fresh tokens to the Pi automatically** while it's connected (see [Automatic IAP token refresh](#automatic-iap-token-refresh-mac--pi)). The Mac only supplies the very first token (or re-bootstraps after the Pi has been offline for over an hour) via `scripts/push-token-to-pi.sh`.
 
@@ -59,7 +59,7 @@ The Cloud Run service sits behind **Identity-Aware Proxy** (org policy blocks `a
 
 ### Option A: Open the Cloud Run URL directly
 
-**https://cloudproxy-server-530731599092.us-west1.run.app/** serves the viewer UI directly — no local setup needed. IAP will prompt you to sign in with Google (your account needs `iap.httpsResourceAccessor`, see [Authentication & Tokens](#authentication--tokens)); then enter the app token and click Connect.
+**https://cloudproxy-server-YOUR_PROJECT_NUMBER.us-west1.run.app/** serves the viewer UI directly — no local setup needed. IAP will prompt you to sign in with Google (your account needs `iap.httpsResourceAccessor`, see [Authentication & Tokens](#authentication--tokens)); then enter the app token and click Connect.
 
 ### Option B: Run the Viewer locally (Mac)
 
@@ -110,7 +110,7 @@ The chain only breaks if the Pi stays disconnected for over an hour (its newest 
 ```bash
 ssh pidesk.local
 
-SIGNAL_URL=wss://cloudproxy-server-530731599092.us-west1.run.app/ws \
+SIGNAL_URL=wss://cloudproxy-server-YOUR_PROJECT_NUMBER.us-west1.run.app/ws \
 AUTH_TOKEN=your-secret-token \
 GCP_IDENTITY_TOKEN_FILE=$HOME/.cloudproxy/iap-token \
 ~/cloudproxy-pi-client
@@ -189,7 +189,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=SIGNAL_URL=wss://cloudproxy-server-530731599092.us-west1.run.app/ws
+Environment=SIGNAL_URL=wss://cloudproxy-server-YOUR_PROJECT_NUMBER.us-west1.run.app/ws
 Environment=AUTH_TOKEN=your-secret-token
 Environment=GCP_IDENTITY_TOKEN_FILE=/home/pi/.cloudproxy/iap-token
 Environment=VIDEO_DEVICE=/dev/video0
@@ -248,7 +248,7 @@ can build the viewer UI and embed it into the Go binary via `go:embed`. Run
 cd /path/to/cloudproxy   # repo root, not server/
 
 # Build and push image
-gcloud builds submit --tag gcr.io/hansel-487018/cloudproxy-server
+gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/cloudproxy-server
 
 # One-time: let the server's runtime service account mint IAP tokens for the
 # Pi (see "Automatic IAP token refresh"). The default runtime SA on this
@@ -256,8 +256,8 @@ gcloud builds submit --tag gcr.io/hansel-487018/cloudproxy-server
 #   gcloud run services describe cloudproxy-server --region us-west1 \
 #     --format='value(spec.template.spec.serviceAccountName)'
 gcloud iam service-accounts add-iam-policy-binding \
-  cloudproxy-pi@hansel-487018.iam.gserviceaccount.com \
-  --member=serviceAccount:530731599092-compute@developer.gserviceaccount.com \
+  cloudproxy-pi@YOUR_PROJECT_ID.iam.gserviceaccount.com \
+  --member=serviceAccount:YOUR_PROJECT_NUMBER-compute@developer.gserviceaccount.com \
   --role=roles/iam.serviceAccountTokenCreator
 
 # Deploy to Cloud Run. Access control is handled by IAP (already enabled on
@@ -266,9 +266,9 @@ gcloud iam service-accounts add-iam-policy-binding \
 # TOKEN_MINT_SA/TOKEN_MINT_AUDIENCE enable server-side IAP token minting for
 # the Pi.
 gcloud run deploy cloudproxy-server \
-  --image gcr.io/hansel-487018/cloudproxy-server \
+  --image gcr.io/YOUR_PROJECT_ID/cloudproxy-server \
   --region us-west1 --port 8080 \
-  --set-env-vars "AUTH_TOKEN=your-secret-token,TOKEN_MINT_SA=cloudproxy-pi@hansel-487018.iam.gserviceaccount.com,TOKEN_MINT_AUDIENCE=https://cloudproxy-server-530731599092.us-west1.run.app/*" \
+  --set-env-vars "AUTH_TOKEN=your-secret-token,TOKEN_MINT_SA=cloudproxy-pi@YOUR_PROJECT_ID.iam.gserviceaccount.com,TOKEN_MINT_AUDIENCE=https://cloudproxy-server-YOUR_PROJECT_NUMBER.us-west1.run.app/*" \
   --min-instances 1 --max-instances 1 \
   --session-affinity --timeout 3600
 ```
@@ -280,7 +280,7 @@ gcloud run deploy cloudproxy-server \
 | `TOKEN_MINT_INTERVAL` | `30m` | How often to deliver a fresh token to the connected publisher |
 
 After deploying, the viewer UI is served at:
-**https://cloudproxy-server-530731599092.us-west1.run.app/**
+**https://cloudproxy-server-YOUR_PROJECT_NUMBER.us-west1.run.app/**
 
 ### Pi Client
 
@@ -296,12 +296,12 @@ ssh pidesk.local "sudo systemctl restart cloudproxy-pi.service"
 
 | Setting | Value |
 |---------|-------|
-| Service URL | `https://cloudproxy-server-530731599092.us-west1.run.app` |
-| GCP Project | `hansel-487018` |
+| Service URL | `https://cloudproxy-server-YOUR_PROJECT_NUMBER.us-west1.run.app` |
+| GCP Project | `YOUR_PROJECT_ID` |
 | Region | `us-west1` |
 | Auth | IAP (Google sign-in for browsers; signed SA JWT via `scripts/mint-iap-token.sh` for machines) + app-level `AUTH_TOKEN` |
 | IAP client ID | `369001918367-t5qrahnqdaasaifvk6akpqkpjk9vli58.apps.googleusercontent.com` |
-| Pi service account | `cloudproxy-pi@hansel-487018.iam.gserviceaccount.com` |
+| Pi service account | `cloudproxy-pi@YOUR_PROJECT_ID.iam.gserviceaccount.com` |
 
 ## Troubleshooting
 

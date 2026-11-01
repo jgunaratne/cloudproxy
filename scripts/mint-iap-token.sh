@@ -9,12 +9,12 @@
 # signed JWT with the resource URL + /* wildcard as audience
 # (https://cloud.google.com/iap/docs/authentication-howto).
 #
-# Usage:  ./scripts/mint-iap-token.sh            # prints the token
+# Usage:  TOKEN_MINT_SA=... SERVICE_URL=https://... ./scripts/mint-iap-token.sh   # prints the token
 #         GCP_IDENTITY_TOKEN=$(./scripts/mint-iap-token.sh)
 set -euo pipefail
 
-SA="cloudproxy-pi@hansel-487018.iam.gserviceaccount.com"
-AUD="https://cloudproxy-server-530731599092.us-west1.run.app/*"
+SA="${TOKEN_MINT_SA:?set TOKEN_MINT_SA to the Pi service-account email}"
+AUD="${SERVICE_URL:?set SERVICE_URL to the Cloud Run service URL}/*"
 
 NOW=$(date +%s)
 PAYLOAD=$(python3 -c "import json; print(json.dumps({'payload': json.dumps({'iss':'$SA','sub':'$SA','aud':'$AUD','iat':$NOW,'exp':$NOW+3600})}))")

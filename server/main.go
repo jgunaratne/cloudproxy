@@ -81,6 +81,10 @@ type Server struct {
 func NewServer() *Server {
 	token := os.Getenv("AUTH_TOKEN")
 	if token == "" {
+		// The dev fallback is for local runs only; Cloud Run sets K_SERVICE.
+		if os.Getenv("K_SERVICE") != "" {
+			log.Fatal("AUTH_TOKEN must be set when running on Cloud Run")
+		}
 		token = "cloudproxy-dev-token"
 	}
 	minter := NewTokenMinterFromEnv()
